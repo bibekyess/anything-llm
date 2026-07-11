@@ -89,7 +89,49 @@ prints their paths so you can inspect them.
 **Everything the script did is in Word's undo stack — Ctrl+Z steps back
 through it.**
 
-### 5. Try the sidecar by hand (optional)
+### 5. Run the full AI assistant 🤖 (pi + OpenRouter / Ollama)
+
+This is the complete loop: you chat, the **LLM generates the content and
+decides the edits**, and Word obeys. It uses the same pi agent harness as
+open-computer, pointed at any OpenAI-compatible endpoint.
+
+```powershell
+# one-time: install Node.js (https://nodejs.org), then the pi agent
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+# configure your LLM endpoint
+copy agent\.env.example agent\.env
+notepad agent\.env    # fill in the OpenRouter block (or Ollama later)
+
+# launch the assistant
+python agent\run_agent.py
+```
+
+For **OpenRouter** (quick check): get a key at https://openrouter.ai/keys and
+pick any tool-calling-capable model (e.g. `anthropic/claude-sonnet-4.5`,
+`openai/gpt-4o-mini`). For **Ollama** later: uncomment the Ollama block in
+`agent/.env` and use a tool-calling model like `qwen2.5:14b` — nothing else
+changes.
+
+Then try your two scenarios in the chat:
+
+- *"Write a one-page report on Korean culture in a new Word document."*
+  → watch the LLM `doc_new` + `doc_insert` a styled report into Word.
+- Open a document with some list-like text, select it, then:
+  *"Convert my selected text into a table."*
+  → the LLM reads your selection and swaps it for a real Word table.
+
+`python agent\run_agent.py --dry-run` prints the resolved endpoint/model and
+the exact pi command without launching (useful to verify your `.env`).
+
+> How it's wired: `run_agent.py` writes your endpoint into
+> `~/.pi/agent/models.json` (same provider schema open-computer generates in
+> `interface-service/pi/process.js`), then runs
+> `pi --provider writing-assistant --model <id> --extension extension/doc-tools.ts`
+> with a writing-assistant system prompt. pi hosts the agent loop; doc-tools.ts
+> forwards tool calls to the docd sidecar; docd drives Word over COM.
+
+### 6. Try the sidecar by hand (optional)
 
 The sidecar is just a process speaking JSON lines — you can drive it from any
 terminal:
@@ -119,20 +161,22 @@ exactly the interface your app's agent loop will use.
 | Calls hang / `APP_BUSY_MODAL` | A dialog box is open in Word — dismiss it and retry |
 | Word starts but stays invisible | Kill orphaned `WINWORD.EXE` in Task Manager and rerun |
 | Tests pass but smoke fails at `doc_new` | Word isn't installed / not activated for COM — open Word manually once first |
+| `pi` not found after npm install | Reopen the terminal (PATH refresh), or check `npm config get prefix` is on PATH |
+| Agent chats but never edits Word | The model doesn't support tool calling — pick one that does (see `.env.example`) |
+| OpenRouter 401 | Wrong/expired `OPENAI_API_KEY` in `agent/.env` |
 
 ---
 
 ## Wiring it into your app
 
-Your app hosts the **agent loop** (any tool-calling LLM: Claude, GPT, or a
-local model via the open-computer patterns); the loop declares the `doc_*`
-tools and forwards calls to the sidecar:
+`agent/run_agent.py` is the reference wiring: pi hosts the agent loop, any
+OpenAI-compatible endpoint provides the LLM, `extension/doc-tools.ts` bridges
+to the sidecar. To embed in your own app instead, you have two options:
 
-- **Using pi** (open-computer's harness): register
-  `extension/doc-tools.ts` as an extension — same pattern as
-  open-computer's `desktop-apps.ts`. Set `DOCD_PYTHON`/`DOCD_CWD` env vars if
-  the sidecar isn't at the default location.
-- **Using your own loop**: spawn `python -m docd`, keep it alive, send
+- **Ship pi inside your app** and drive it in RPC mode (`--mode rpc`, JSON
+  events over stdio) the way open-computer's interface-service does — you get
+  the loop, retries, and session handling for free.
+- **Write your own loop**: spawn `python -m docd`, keep it alive, send
   `{"id","method","params"}` lines, read `{"id","result"|"error"}` lines. The
   tool schemas to give your LLM are in `extension/doc-tools.ts`.
 
@@ -152,6 +196,9 @@ windows-writing-assistant/
 │       ├── word.py        # MS Word via COM (pywin32) — Windows only
 │       └── fake.py        # in-memory backend for tests/dev on any OS
 ├── extension/doc-tools.ts # pi extension: doc_* tools -> sidecar JSON-RPC client
+├── agent/
+│   ├── run_agent.py       # launch pi + doc-tools against any OpenAI-compatible LLM
+│   └── .env.example       # OpenRouter / Ollama / LM Studio endpoint configs
 ├── tests/                 # cross-platform: pytest, no Word needed
 └── smoke/word_smoke.py    # manual end-to-end check on Windows + Word
 ```
