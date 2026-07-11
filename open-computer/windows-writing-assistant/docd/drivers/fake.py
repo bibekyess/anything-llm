@@ -245,8 +245,8 @@ class FakeDriver(BaseDriver):
             at = idx if where == "before_para" else idx + 1
         else:
             raise DocdError("BAD_PARAMS", f"Unsupported insert anchor '{where}' on fake backend.")
-        pieces = render.parse_styled_text(text, style_map)
-        d.paras[at:at] = [{"text": t, "style": s} for t, s in pieces]
+        pieces = render.parse_markdown(text, style_map)
+        d.paras[at:at] = [{"text": p["text"], "style": p["style"]} for p in pieces]
         d.dirty = True
         return {
             "inserted": len(pieces),
@@ -303,8 +303,10 @@ class FakeDriver(BaseDriver):
         addressing.check_range_hashes(
             self._text_at(d), len(d.paras), from_para, to_para, expect_hashes
         )
-        pieces = render.parse_styled_text(new_text, True) if new_text else []
-        d.paras[from_para : to_para + 1] = [{"text": t, "style": s} for t, s in pieces]
+        pieces = render.parse_markdown(new_text, True) if new_text else []
+        d.paras[from_para : to_para + 1] = [
+            {"text": p["text"], "style": p["style"]} for p in pieces
+        ]
         if not d.paras:
             d.paras = [{"text": "", "style": None}]
         d.dirty = True

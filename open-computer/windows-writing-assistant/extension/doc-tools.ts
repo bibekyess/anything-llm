@@ -356,7 +356,7 @@ export default function (pi: ExtensionAPI) {
     name: "doc_insert",
     label: "Insert Text",
     description:
-      "Insert text into a document. '\\n' starts a new paragraph; markdown headings (#, ##) map to Heading styles. Anchor with where=end/cursor, or before_para/after_para + para index (+ expect_hash from doc_read to guard against concurrent edits), or a Word bookmark. The user sees the edit live; it is undoable with Ctrl+Z.",
+      "Insert text into a document. '\\n' starts a new paragraph. Markdown becomes REAL formatting: # headings -> Heading styles, **bold**, *italic*, `code`, -/* bullets, 1. numbered lists, [ ]/[x] checkboxes, > quotes — so write normal markdown, never raw markers meant to be visible. Anchor with where=end/cursor, or before_para/after_para + para index (+ expect_hash from doc_read to guard against concurrent edits), or a Word bookmark. The user sees the edit live; it is undoable with Ctrl+Z.",
     parameters: Type.Object({
       doc: Type.String(),
       text: Type.String(),
@@ -429,7 +429,7 @@ export default function (pi: ExtensionAPI) {
       from_para: Type.Number(),
       to_para: Type.Number(),
       expect_hashes: Type.Array(Type.String()),
-      new_text: Type.String({ description: "'\\n' separates paragraphs; empty deletes the range." }),
+      new_text: Type.String({ description: "'\\n' separates paragraphs; empty deletes the range. Markdown formatting (headings, **bold**, *italic*, lists, checkboxes) is rendered as real formatting." }),
     }),
     async execute(_id, params) {
       try {

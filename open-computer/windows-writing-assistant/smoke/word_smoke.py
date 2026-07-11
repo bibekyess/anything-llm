@@ -69,6 +69,17 @@ def main():
 
     step("doc_apply_style", driver.apply_style(handle, 0, style="Title"))
 
+    step("doc_insert (markdown formatting: bold/italic/lists/checkboxes)", driver.insert(
+        handle,
+        "**Summary Checklist:**\n"
+        "*   [ ] *Verify* the **bold** text renders bold\n"
+        "*   [x] Confirm checkboxes become glyphs\n"
+        "1.  **First:** numbered item with a bold label\n"
+        "2.  Second item with `inline code`\n"
+        "> A quoted remark",
+        where="end",
+    ))
+
     # ── Scenario 2: convert text into a real Word table ────────────────
     step("insert city lines for the table demo", driver.insert(
         handle,

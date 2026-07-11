@@ -41,6 +41,17 @@ SAVE_FORMATS = {
     "txt": 2,    # wdFormatText
 }
 
+# WdBuiltinStyle ids — locale-independent (English style NAMES like
+# "Heading 1" fail on localized Word installs, e.g. Korean).
+BUILTIN_STYLES = {
+    "Normal": -1,
+    **{f"Heading {i}": -1 - i for i in range(1, 10)},  # wdStyleHeading1=-2 ...
+    "Title": -63,
+    "List Bullet": -66,
+    "List Number": -67,
+    "Quote": -181,
+}
+
 # Modal dialog up -> COM calls bounce with these HRESULTs (design doc §3).
 RPC_E_CALL_REJECTED = -2147418111       # 0x80010001
 RPC_E_SERVERCALL_RETRYLATER = -2147417846  # 0x8001010A
@@ -166,6 +177,39 @@ class WordDriver(BaseDriver):
         """0-based document index of a COM Paragraph (Range-start trick, §3)."""
         start = com_para.Range.Start
         return doc.Range(0, start).Paragraphs.Count if start > 0 else 0
+
+    @staticmethod
+    def _style_object(d, style):
+        """Resolve a normalized style name to a Style, preferring the
+        locale-independent WdBuiltinStyle id over the (localized) name."""
+        builtin = BUILTIN_STYLES.get(style)
+        if builtin is not None:
+            try:
+                return d.Styles(builtin)
+            except Exception:
+                pass
+        return d.Styles(style)  # custom/template style by name
+
+    def _apply_paragraph_styles(self, d, rng, pieces):
+        for k, piece in enumerate(pieces, start=1):
+            if piece["style"]:
+                try:
+                    rng.Paragraphs(k).Style = self._style_object(d, piece["style"])
+                except Exception:
+                    pass  # style unavailable; leave as body text
+
+    def _apply_inline_spans(self, d, base, spans):
+        """Apply bold/italic/code spans; offsets are relative to `base` and
+        map 1:1 to Range positions because the payload was inserted as plain
+        text ('\r' counts as one position, like every character)."""
+        for start, end, fmt in spans:
+            r = d.Range(base + start, base + end)
+            if fmt.get("bold"):
+                r.Bold = True
+            if fmt.get("italic"):
+                r.Italic = True
+            if fmt.get("code"):
+                r.Font.Name = "Consolas"
 
     # ── BaseDriver ─────────────────────────────────────────────────────
     @com_retry
@@ -423,22 +467,18 @@ class WordDriver(BaseDriver):
         else:
             raise DocdError("BAD_PARAMS", f"Unknown insert anchor '{where}'.")
 
-        pieces = render.parse_styled_text(text, style_map)
-        payload = "\r".join(t for t, _ in pieces)
+        pieces = render.parse_markdown(text, style_map)
+        payload, spans = render.flatten_payload(pieces)
         # A standalone block needs a trailing paragraph mark unless appending
-        # inline at the caret.
+        # inline at the caret. (Appending doesn't shift span offsets.)
         if where != "cursor":
             payload += "\r"
         ins_start = anchor.Start
         anchor.InsertAfter(payload)  # extends `anchor` over the inserted text
         ins_rng = d.Range(ins_start, anchor.End)
 
-        for k, (_, style) in enumerate(pieces, start=1):
-            if style:
-                try:
-                    ins_rng.Paragraphs(k).Style = d.Styles(style)
-                except Exception:
-                    pass  # style not in template; leave as body text
+        self._apply_paragraph_styles(d, ins_rng, pieces)
+        self._apply_inline_spans(d, ins_start, spans)
 
         if restore_bookmark and not d.Bookmarks.Exists(restore_bookmark):
             d.Bookmarks.Add(restore_bookmark, d.Range(ins_start, ins_start))
@@ -579,18 +619,16 @@ class WordDriver(BaseDriver):
         # Keep the final paragraph mark of the doc intact.
         if rng.End >= d.Content.End:
             rng = d.Range(rng.Start, d.Content.End - 1)
-        pieces = render.parse_styled_text(new_text, True) if new_text else []
+        pieces = render.parse_markdown(new_text, True) if new_text else []
         if not pieces:
             rng.Text = ""
             return {"replaced": 0, "deleted": to_para - from_para + 1, "affected": []}
-        rng.Text = "\r".join(t for t, _ in pieces) + "\r"
+        payload, spans = render.flatten_payload(pieces)
+        base = rng.Start
+        rng.Text = payload + "\r"
         new_rng = d.Range(rng.Start, rng.End)
-        for k, (_, style) in enumerate(pieces, start=1):
-            if style:
-                try:
-                    new_rng.Paragraphs(k).Style = d.Styles(style)
-                except Exception:
-                    pass
+        self._apply_paragraph_styles(d, new_rng, pieces)
+        self._apply_inline_spans(d, base, spans)
         self._scroll_to(new_rng)
         return {
             "replaced": len(pieces),
@@ -605,7 +643,7 @@ class WordDriver(BaseDriver):
         if from_para < 0 or end >= d.Paragraphs.Count:
             raise DocdError("BAD_PARAMS", "Paragraph range out of bounds.")
         try:
-            style_obj = d.Styles(style)
+            style_obj = self._style_object(d, style)
         except Exception:
             raise DocdError("BAD_PARAMS", f"Style '{style}' not found in this document.")
         for i in range(from_para, end + 1):
