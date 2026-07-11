@@ -164,6 +164,7 @@ exactly the interface your app's agent loop will use.
 | `pi` not found after npm install | Reopen the terminal (PATH refresh), or check `npm config get prefix` is on PATH |
 | Agent chats but never edits Word | The model doesn't support tool calling — pick one that does (see `.env.example`) |
 | OpenRouter 401 | Wrong/expired `OPENAI_API_KEY` in `agent/.env` |
+| Korean text errors (`surrogates not allowed`) or `â€"`-style garbage in documents | Fixed — `git pull`. Root cause: Windows Python decoded the UTF-8 RPC pipe with the ANSI code page; the sidecar now forces UTF-8 stdio |
 
 ---
 

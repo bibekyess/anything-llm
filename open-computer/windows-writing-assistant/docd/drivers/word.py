@@ -466,9 +466,13 @@ class WordDriver(BaseDriver):
         else:
             rng = d.Content
 
-        if regex:
+        # Word's Find.Execute rejects FindText/ReplaceWith over 255 chars;
+        # route long literals through the paragraph-rewrite emulation.
+        long_literal = len(find) > 255 or len(replace) > 255
+        if regex or long_literal:
             replaced, touched = self._replace_regex(
-                d, rng, find, replace, match_case, occurrence
+                d, rng, find if regex else re.escape(find), replace,
+                match_case, occurrence, literal=not regex,
             )
         else:
             replaced, touched = self._replace_native(
@@ -521,11 +525,16 @@ class WordDriver(BaseDriver):
                 return 1, [idx]
             search = d.Range(search.End, rng.End)
 
-    def _replace_regex(self, d, rng, find, replace, match_case, occurrence):
+    def _replace_regex(self, d, rng, find, replace, match_case, occurrence,
+                       literal=False):
         """Python-re emulation over paragraph text (design doc §3: full regex
-        is emulated; Word wildcards only cover a subset)."""
+        is emulated; Word wildcards only cover a subset). Also the fallback
+        for literal find/replace over Word's 255-char Find.Execute limit —
+        `literal` keeps '\\' in the replacement out of re's template escapes
+        on the subn path (the occurrence path splices raw text)."""
         flags = 0 if match_case else re.IGNORECASE
         pattern = re.compile(find, flags)
+        template = replace.replace("\\", "\\\\") if literal else replace
         first = self._global_index(d, rng.Paragraphs(1))
         n_paras = rng.Paragraphs.Count
         limit = 0 if occurrence == "all" else (1 if occurrence == "first" else int(occurrence))
@@ -537,7 +546,7 @@ class WordDriver(BaseDriver):
             text = p_rng.Text
             body, tail = (text[:-1], text[-1]) if text.endswith("\r") else (text, "")
             if limit == 0:
-                new, n = pattern.subn(replace, body)
+                new, n = pattern.subn(template, body)
                 replaced += n
             else:
                 new, n = body, 0

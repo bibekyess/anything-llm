@@ -24,7 +24,10 @@ def normalize(text):
 
 def para_hash(text):
     """4-hex-char content hash, e.g. '3fa2' in '[p0#3fa2]'."""
-    return hashlib.sha1(normalize(text).encode("utf-8")).hexdigest()[:HASH_LEN]
+    # surrogatepass: never crash hashing on stray lone surrogates (e.g. odd
+    # clipboard content inside a Word doc); the hash just has to be stable.
+    encoded = normalize(text).encode("utf-8", "surrogatepass")
+    return hashlib.sha1(encoded).hexdigest()[:HASH_LEN]
 
 
 def snapshot_rev(hashes):

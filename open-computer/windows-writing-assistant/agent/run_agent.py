@@ -133,6 +133,9 @@ def main():
         # doc-tools.ts spawns the sidecar with these:
         "DOCD_PYTHON": sys.executable,
         "DOCD_CWD": ROOT,
+        # Keep the whole pipeline UTF-8 on Windows (Korean/CJK safety).
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
     }
     if api_key:
         env["OPENAI_API_KEY"] = api_key

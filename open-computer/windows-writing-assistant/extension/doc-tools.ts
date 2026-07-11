@@ -43,6 +43,13 @@ class Sidecar {
     this.proc = spawn(PYTHON, DOCD_ARGS, {
       cwd: DOCD_CWD,
       stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        // The RPC pipe is UTF-8; without these, Windows Python decodes stdin
+        // with the ANSI code page and shreds Korean/CJK text into surrogates.
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8",
+      },
     });
     this.proc.stdout!.on("data", (chunk: Buffer) => this.onData(chunk));
     this.proc.stderr!.on("data", () => {}); // sidecar logs; keep the pipe drained

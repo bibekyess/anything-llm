@@ -260,6 +260,9 @@ class FakeDriver(BaseDriver):
         d = self._writable(doc)
         flags = 0 if match_case else re.IGNORECASE
         pattern = re.compile(find if regex else re.escape(find), flags)
+        # subn treats '\' in the replacement as a template escape; the
+        # occurrence path below splices raw text, so only escape for subn.
+        template = replace if regex else replace.replace("\\", "\\\\")
         lo = scope["from_para"] if scope else 0
         hi = scope["to_para"] if scope else len(d.paras) - 1
         limit = (
@@ -272,7 +275,7 @@ class FakeDriver(BaseDriver):
         for i in range(lo, min(hi, len(d.paras) - 1) + 1):
             text = d.paras[i]["text"]
             if limit == 0:
-                new, n = pattern.subn(replace, text)
+                new, n = pattern.subn(template, text)
                 replaced += n
             else:
                 new, n = text, 0

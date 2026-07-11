@@ -8,7 +8,20 @@ import argparse
 import sys
 
 
+def force_utf8_stdio():
+    """The RPC protocol is UTF-8, always. On Windows, Python defaults piped
+    stdio to the legacy ANSI code page (cp1252/cp949), which shreds Korean
+    and any other non-ASCII text into surrogate escapes."""
+    for stream, errors in ((sys.stdin, "replace"), (sys.stdout, "replace"),
+                           (sys.stderr, "backslashreplace")):
+        try:
+            stream.reconfigure(encoding="utf-8", errors=errors)
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main():
+    force_utf8_stdio()
     parser = argparse.ArgumentParser(prog="docd")
     parser.add_argument(
         "--backend",
