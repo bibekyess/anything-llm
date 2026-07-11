@@ -11,7 +11,7 @@ import re
 
 from .. import addressing, render
 from ..errors import (
-    DocdError, NO_SUCH_DOC, READ_ONLY, SAVE_FORMAT_UNSUPPORTED,
+    DocdError, BAD_PARAMS, NO_SUCH_DOC, READ_ONLY, SAVE_FORMAT_UNSUPPORTED,
 )
 from .base import BaseDriver
 
@@ -22,7 +22,9 @@ class _FakeDoc:
         self.read_only = read_only
         self.dirty = False
         self.paras = [{"text": "", "style": None}]
-        if os.path.exists(path):
+        self.tables = []          # [{"at_para": int, "values": [[str]]}]
+        self.selection = None     # (from_para, to_para) set via debug hook
+        if path and os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 content = f.read()
             self.paras = [
@@ -38,6 +40,13 @@ def _style_of(line):
 
 def _strip_md(line):
     return re.sub(r"^#{1,9} ", "", line)
+
+
+def _render_table(values):
+    lines = ["| " + " | ".join(row) + " |" for row in values]
+    if len(lines) > 1:
+        lines.insert(1, "|" + "---|" * len(values[0]))
+    return "\n".join(lines)
 
 
 class FakeDriver(BaseDriver):
@@ -102,6 +111,104 @@ class FakeDriver(BaseDriver):
             "dirty": False,
             "read_only": read_only,
         }
+
+    def new_doc(self):
+        self._counter += 1
+        handle = f"{self.prefix}{self._counter}"
+        self._docs[handle] = _FakeDoc(None, read_only=False)
+        return {"doc": handle, "path": None, "paragraphs": 1}
+
+    def selection(self, doc):
+        d = self._doc(doc)
+        if not d.selection:
+            return {"collapsed": True, "text": "", "from_para": None,
+                    "to_para": None, "hashes": []}
+        lo, hi = d.selection
+        hi = min(hi, len(d.paras) - 1)
+        texts = [_strip_md(d.paras[i]["text"]) for i in range(lo, hi + 1)]
+        return {
+            "collapsed": False,
+            "text": "\n".join(texts),
+            "from_para": lo,
+            "to_para": hi,
+            "hashes": [addressing.para_hash(t) for t in texts],
+        }
+
+    def debug_set_selection(self, doc, from_para, to_para):
+        d = self._doc(doc)
+        d.selection = (from_para, to_para)
+        return {"ok": True}
+
+    def tables(self, doc, op, table=None, cell=None, value=None, values=None,
+               at=None, para=None, expect_hash=None, replace_range=None,
+               header_row=False):
+        d = self._doc(doc)
+        if op == "list":
+            return {"tables": [
+                {"table": f"t{i}", "rows": len(t["values"]),
+                 "cols": len(t["values"][0]) if t["values"] else 0,
+                 "at_para": t["at_para"]}
+                for i, t in enumerate(d.tables)
+            ]}
+        if op == "read":
+            t = self._table(d, table)
+            return {"table": table, "rows": len(t["values"]),
+                    "cols": len(t["values"][0]) if t["values"] else 0,
+                    "text": _render_table(t["values"])}
+        if op == "write":
+            self._writable(doc)
+            t = self._table(d, table)
+            block = values if values is not None else [[value]]
+            if cell is None:
+                raise DocdError(BAD_PARAMS, "tables write requires `cell`.")
+            written = 0
+            for r, row in enumerate(block):
+                for c, val in enumerate(row):
+                    rr, cc = cell["row"] + r, cell["col"] + c
+                    if rr < len(t["values"]) and cc < len(t["values"][rr]):
+                        t["values"][rr][cc] = val
+                        written += 1
+            d.dirty = True
+            return {"written": written}
+        if op == "create":
+            self._writable(doc)
+            if not values:
+                raise DocdError(BAD_PARAMS, "tables create requires `values`.")
+            deleted = 0
+            if replace_range:
+                lo, hi = replace_range["from_para"], replace_range["to_para"]
+                addressing.check_range_hashes(
+                    self._text_at(d), len(d.paras), lo, hi,
+                    replace_range["expect_hashes"],
+                )
+                del d.paras[lo : hi + 1]
+                if not d.paras:
+                    d.paras = [{"text": "", "style": None}]
+                deleted = hi - lo + 1
+                at_para = lo
+            elif at in ("before_para", "after_para"):
+                if para is None:
+                    raise DocdError(BAD_PARAMS, f"'{at}' requires `para`.")
+                idx, _ = addressing.resolve_anchor(
+                    self._text_at(d), len(d.paras), para, expect_hash
+                )
+                at_para = idx if at == "before_para" else idx + 1
+            else:
+                at_para = len(d.paras)
+            d.tables.append({"at_para": at_para, "values": [list(r) for r in values]})
+            d.dirty = True
+            return {"table": f"t{len(d.tables) - 1}", "rows": len(values),
+                    "cols": len(values[0]), "at_para": at_para,
+                    "deleted_paras": deleted}
+        raise DocdError(BAD_PARAMS, f"Unknown tables op '{op}'.")
+
+    def _table(self, d, table):
+        if not table or not table.startswith("t"):
+            raise DocdError(BAD_PARAMS, "tables read/write requires `table` (e.g. 't0').")
+        idx = int(table[1:])
+        if idx >= len(d.tables):
+            raise DocdError(BAD_PARAMS, f"No table '{table}' in this document.")
+        return d.tables[idx]
 
     def read(self, doc, from_para=None, to_para=None, max_chars=None):
         d = self._doc(doc)
@@ -216,6 +323,11 @@ class FakeDriver(BaseDriver):
 
     def save(self, doc):
         d = self._writable(doc)
+        if not d.path:
+            raise DocdError(
+                BAD_PARAMS,
+                "This document has never been saved; use doc_save_as with a path.",
+            )
         self._write(d, d.path)
         d.dirty = False
         return {"saved": True, "path": d.path}
@@ -228,12 +340,14 @@ class FakeDriver(BaseDriver):
                 f"Fake backend can only save txt/md, not '{format}'.",
             )
         self._write(d, path)
+        d.path = d.path or path
+        d.dirty = False
         return {"saved": True, "path": path, "format": format}
 
     def close(self, doc, discard_changes=False):
         d = self._doc(doc)
         was_dirty = d.dirty
-        if was_dirty and not discard_changes:
+        if was_dirty and not discard_changes and d.path:
             self._write(d, d.path)
         del self._docs[doc]
         return {"closed": True, "was_dirty": was_dirty}

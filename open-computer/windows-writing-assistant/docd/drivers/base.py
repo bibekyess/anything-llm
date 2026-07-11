@@ -19,6 +19,30 @@ class BaseDriver:
         """-> {doc, path, paragraphs, dirty, read_only}"""
         raise NotImplementedError
 
+    def new_doc(self):
+        """Create a blank document. -> {doc, path: None, paragraphs}"""
+        raise NotImplementedError
+
+    def selection(self, doc):
+        """Read the user's current selection in the document window.
+        -> {collapsed, text, from_para, to_para, hashes}"""
+        raise NotImplementedError
+
+    def tables(self, doc, op, table=None, cell=None, value=None, values=None,
+               at=None, para=None, expect_hash=None, replace_range=None,
+               header_row=False):
+        """op: list | read | write | create. See com-toolset-design.md §2.1.
+        -> op-specific dict"""
+        raise NotImplementedError
+
+    def debug_set_selection(self, doc, from_para, to_para):
+        """Test hook (fake backend only): simulate a user selection."""
+        from ..errors import DocdError, UNSUPPORTED_ON_BACKEND
+        raise DocdError(
+            UNSUPPORTED_ON_BACKEND,
+            "debug_set_selection is only available on the fake backend.",
+        )
+
     def read(self, doc, from_para=None, to_para=None, max_chars=None):
         """-> {text, from_para, to_para, count, rev}"""
         raise NotImplementedError

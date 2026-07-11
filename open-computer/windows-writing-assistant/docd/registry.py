@@ -25,6 +25,10 @@ class Dispatcher:
             "ping": self._ping,
             "doc_list_open": self._list_open,
             "doc_open": self._open,
+            "doc_new": self._new,
+            "doc_selection": self._by_handle("selection"),
+            "doc_tables": self._by_handle("tables"),
+            "debug_set_selection": self._by_handle("debug_set_selection"),
             "doc_read": self._by_handle("read"),
             "doc_outline": self._by_handle("outline"),
             "doc_insert": self._by_handle("insert"),
@@ -73,6 +77,16 @@ class Dispatcher:
         for driver in self.drivers.values():
             docs.extend(driver.list_open()["docs"])
         return {"docs": docs}
+
+    def _new(self, app=None):
+        backend = app or ("word" if "word" in self.drivers else "fake")
+        if backend not in self.drivers:
+            raise DocdError(
+                BAD_PARAMS,
+                f"Backend '{backend}' is not available in this build "
+                f"(have: {', '.join(sorted(self.drivers))}).",
+            )
+        return self.drivers[backend].new_doc()
 
     def _open(self, path=None, app=None, read_only=False):
         if not path:

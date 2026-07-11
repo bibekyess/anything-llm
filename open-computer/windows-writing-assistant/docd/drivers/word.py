@@ -31,6 +31,7 @@ WD_REPLACE_ALL = 2
 WD_OUTLINE_BODY = 10
 WD_WITHIN_TABLE = 12      # Range.Information(wdWithInTable)
 WD_ALERTS_NONE = 0
+WD_SELECTION_IP = 1       # wdSelectionIP: collapsed caret, nothing selected
 
 SAVE_FORMATS = {
     "docx": 12,  # wdFormatXMLDocument
@@ -207,6 +208,156 @@ class WordDriver(BaseDriver):
             "paragraphs": com_doc.Paragraphs.Count,
             "dirty": not com_doc.Saved,
             "read_only": bool(com_doc.ReadOnly),
+        }
+
+    @com_retry
+    def new_doc(self):
+        app = self._ensure_app()
+        com_doc = app.Documents.Add()
+        self._counter += 1
+        handle = f"{self.prefix}{self._counter}"
+        self._docs[handle] = com_doc
+        return {"doc": handle, "path": None, "paragraphs": com_doc.Paragraphs.Count}
+
+    @com_retry
+    def selection(self, doc):
+        d = self._doc(doc)
+        app = self._ensure_app()
+        sel = app.Selection
+        # The selection must belong to this document's window.
+        if sel.Document.FullName != d.FullName or sel.Type == WD_SELECTION_IP:
+            return {"collapsed": True, "text": "", "from_para": None,
+                    "to_para": None, "hashes": []}
+        rng = sel.Range
+        first = self._global_index(d, rng.Paragraphs(1))
+        last = first + rng.Paragraphs.Count - 1
+        hashes = [addressing.para_hash(self._para_text(d, i))
+                  for i in range(first, last + 1)]
+        return {
+            "collapsed": False,
+            "text": rng.Text.rstrip("\r"),
+            "from_para": first,
+            "to_para": last,
+            "hashes": hashes,
+        }
+
+    @com_retry
+    def tables(self, doc, op, table=None, cell=None, value=None, values=None,
+               at=None, para=None, expect_hash=None, replace_range=None,
+               header_row=False):
+        d = self._doc(doc)
+        if op == "list":
+            out = []
+            for i in range(1, d.Tables.Count + 1):
+                t = d.Tables(i)
+                out.append({
+                    "table": f"t{i - 1}",
+                    "rows": t.Rows.Count,
+                    "cols": t.Columns.Count,
+                    "at_para": self._global_index(d, t.Range.Paragraphs(1)),
+                })
+            return {"tables": out}
+        if op == "read":
+            t = self._com_table(d, table)
+            rows = []
+            for r in range(1, t.Rows.Count + 1):
+                row = []
+                for c in range(1, t.Columns.Count + 1):
+                    try:
+                        row.append(t.Cell(r, c).Range.Text.rstrip("\r\x07"))
+                    except Exception:
+                        row.append("")  # merged/missing cell
+                rows.append(row)
+            lines = ["| " + " | ".join(r) + " |" for r in rows]
+            if len(lines) > 1:
+                lines.insert(1, "|" + "---|" * (t.Columns.Count))
+            return {"table": table, "rows": t.Rows.Count,
+                    "cols": t.Columns.Count, "text": "\n".join(lines)}
+        if op == "write":
+            self._writable(doc)
+            t = self._com_table(d, table)
+            if cell is None:
+                raise DocdError("BAD_PARAMS", "tables write requires `cell`.")
+            block = values if values is not None else [[value]]
+            written = 0
+            for r, row in enumerate(block):
+                for c, val in enumerate(row):
+                    rr, cc = cell["row"] + 1 + r, cell["col"] + 1 + c
+                    if rr <= t.Rows.Count and cc <= t.Columns.Count:
+                        t.Cell(rr, cc).Range.Text = val
+                        written += 1
+            self._scroll_to(t.Range)
+            return {"written": written}
+        if op == "create":
+            self._writable(doc)
+            if not values or not values[0]:
+                raise DocdError("BAD_PARAMS", "tables create requires non-empty `values`.")
+            return self._create_table(
+                d, values, at, para, expect_hash, replace_range, header_row
+            )
+        raise DocdError("BAD_PARAMS", f"Unknown tables op '{op}'.")
+
+    def _com_table(self, d, table):
+        if not table or not table.startswith("t"):
+            raise DocdError("BAD_PARAMS", "tables read/write requires `table` (e.g. 't0').")
+        idx = int(table[1:]) + 1
+        if idx > d.Tables.Count:
+            raise DocdError("BAD_PARAMS", f"No table '{table}' in this document.")
+        return d.Tables(idx)
+
+    def _create_table(self, d, values, at, para, expect_hash, replace_range,
+                      header_row):
+        count = d.Paragraphs.Count
+        deleted = 0
+        if replace_range:
+            # Convert-selection-to-table: verify hashes, delete the source
+            # paragraphs, then build the table where they were.
+            lo, hi = replace_range["from_para"], replace_range["to_para"]
+            addressing.check_range_hashes(
+                self._text_at(d), count, lo, hi, replace_range["expect_hashes"]
+            )
+            rng = d.Range(
+                d.Paragraphs(lo + 1).Range.Start, d.Paragraphs(hi + 1).Range.End
+            )
+            if rng.End >= d.Content.End:
+                rng = d.Range(rng.Start, d.Content.End - 1)
+            rng.Text = ""
+            deleted = hi - lo + 1
+            anchor = d.Range(rng.Start, rng.Start)
+        elif at in ("before_para", "after_para"):
+            if para is None:
+                raise DocdError("BAD_PARAMS", f"'{at}' requires `para`.")
+            idx, _ = addressing.resolve_anchor(
+                self._text_at(d), count, para, expect_hash
+            )
+            p_rng = d.Paragraphs(idx + 1).Range
+            pos = p_rng.Start if at == "before_para" else p_rng.End
+            anchor = d.Range(pos, pos)
+        else:  # end of document
+            end = d.Content.End - 1
+            anchor = d.Range(end, end)
+
+        table = d.Tables.Add(anchor, len(values), len(values[0]))
+        table.Borders.Enable = True  # locale-independent (style names are localized)
+        for r, row in enumerate(values, start=1):
+            for c, val in enumerate(row, start=1):
+                table.Cell(r, c).Range.Text = str(val)
+        if header_row:
+            table.Rows(1).Range.Bold = True
+            table.Rows(1).HeadingFormat = True
+        self._scroll_to(table.Range)
+        # Table ids are collection positions; find where this one landed.
+        t_index = next(
+            (i for i in range(1, d.Tables.Count + 1)
+             if d.Tables(i).Range.Start == table.Range.Start),
+            d.Tables.Count,
+        )
+        return {
+            "table": f"t{t_index - 1}",
+            "rows": len(values),
+            "cols": len(values[0]),
+            "at_para": self._global_index(d, table.Range.Paragraphs(1)),
+            "deleted_paras": deleted,
         }
 
     @com_retry
@@ -459,6 +610,11 @@ class WordDriver(BaseDriver):
     @com_retry
     def save(self, doc):
         d = self._writable(doc)
+        if not d.Path:  # never saved: Save() would pop a modal SaveAs dialog
+            raise DocdError(
+                "BAD_PARAMS",
+                "This document has never been saved; use doc_save_as with a path.",
+            )
         d.Save()
         return {"saved": True, "path": d.FullName}
 
@@ -478,6 +634,12 @@ class WordDriver(BaseDriver):
     def close(self, doc, discard_changes=False):
         d = self._doc(doc)
         was_dirty = not d.Saved
+        if not d.Path and not discard_changes and was_dirty:
+            raise DocdError(
+                "BAD_PARAMS",
+                "Unsaved new document: doc_save_as it first, or close with "
+                "discard_changes=true.",
+            )
         d.Close(SaveChanges=0 if discard_changes else -1)  # wdDoNotSaveChanges / wdSaveChanges
         del self._docs[doc]
         return {"closed": True, "was_dirty": was_dirty}

@@ -195,6 +195,121 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "doc_new",
+    label: "New Document",
+    description:
+      "Create a blank document in a visible window (e.g. to write a fresh report into). Returns a handle; the document is unsaved until doc_save_as.",
+    parameters: Type.Object({
+      app: Type.Optional(
+        Type.Union([Type.Literal("word"), Type.Literal("fake")], {
+          description: "Hosting app (default: Word when available).",
+        })
+      ),
+    }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("doc_new", params);
+        return ok(
+          `Created blank document [${res.doc}] (unsaved — use doc_save_as when done). Write into it with doc_insert.`,
+          res
+        );
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "doc_selection",
+    label: "Read User's Selection",
+    description:
+      "Read the text the user currently has selected in the document window, with its paragraph range and hashes — use this when the user says 'this', 'the selected text', etc. Then edit via doc_edit_range or doc_tables create with replace_range.",
+    parameters: Type.Object({ doc: Type.String() }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("doc_selection", params);
+        if (res.collapsed) {
+          return ok(
+            "Nothing is selected (the caret is just placed in the document). Ask the user to select the text, or use doc_read to locate it.",
+            res
+          );
+        }
+        return ok(
+          `Selected p${res.from_para}..p${res.to_para} (hashes: ${res.hashes.join(", ")}):\n${res.text}`,
+          res
+        );
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "doc_tables",
+    label: "Document Tables",
+    description:
+      "Work with tables. op=list (all tables), read (cells as pipe rows), write (set a cell, or a 2-D block via `values` starting at `cell`), create (build a real table from `values`; anchor with at=end/before_para/after_para+para, or pass replace_range {from_para,to_para,expect_hashes} to REPLACE those paragraphs with the table — the 'convert this text to a table' flow).",
+    parameters: Type.Object({
+      doc: Type.String(),
+      op: Type.Union([
+        Type.Literal("list"),
+        Type.Literal("read"),
+        Type.Literal("write"),
+        Type.Literal("create"),
+      ]),
+      table: Type.Optional(Type.String({ description: "Table id from list/read, e.g. 't0'." })),
+      cell: Type.Optional(
+        Type.Object({ row: Type.Number(), col: Type.Number() }, { description: "0-based, for write." })
+      ),
+      value: Type.Optional(Type.String({ description: "Single-cell write value." })),
+      values: Type.Optional(
+        Type.Array(Type.Array(Type.String()), {
+          description: "2-D rows×cols block: cell contents for create, or block write starting at `cell`.",
+        })
+      ),
+      at: Type.Optional(
+        Type.Union([Type.Literal("end"), Type.Literal("before_para"), Type.Literal("after_para")], {
+          description: "Anchor for create (default end).",
+        })
+      ),
+      para: Type.Optional(Type.Number()),
+      expect_hash: Type.Optional(Type.String()),
+      replace_range: Type.Optional(
+        Type.Object({
+          from_para: Type.Number(),
+          to_para: Type.Number(),
+          expect_hashes: Type.Array(Type.String()),
+        })
+      ),
+      header_row: Type.Optional(Type.Boolean({ description: "Bold + repeat first row as header (create)." })),
+    }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("doc_tables", params);
+        if (params.op === "list") {
+          const tables = res.tables as Array<any>;
+          if (!tables.length) return ok("No tables in this document.", res);
+          return ok(
+            tables.map((t) => `[${t.table}] ${t.rows}x${t.cols} at p${t.at_para}`).join("\n"),
+            res
+          );
+        }
+        if (params.op === "read") return ok(res.text, res);
+        if (params.op === "write") return ok(`Wrote ${res.written} cell(s).`, res);
+        const replaced = res.deleted_paras
+          ? ` (replaced ${res.deleted_paras} source paragraph(s))`
+          : "";
+        return ok(
+          `Created table [${res.table}] ${res.rows}x${res.cols} at p${res.at_para}${replaced}.`,
+          res
+        );
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
     name: "doc_read",
     label: "Read Document",
     description:
