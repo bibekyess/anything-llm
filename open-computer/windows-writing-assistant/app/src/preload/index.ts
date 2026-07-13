@@ -11,6 +11,7 @@ export interface AssistantApi {
     create(): Promise<string>;
   };
   win: { minimize(): void; close(): void; restore(): void };
+  log(level: "info" | "warn" | "error" | "debug", message: string): void;
 }
 
 const view = new URLSearchParams(location.search).get("view") || "chat";
@@ -34,6 +35,7 @@ const api: AssistantApi = {
     close: () => ipcRenderer.send("win:close"),
     restore: () => ipcRenderer.send("orb:restore"),
   },
+  log: (level, message) => ipcRenderer.send("renderer:log", level, message),
 };
 
 contextBridge.exposeInMainWorld("assistant", api);

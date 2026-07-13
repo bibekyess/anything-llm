@@ -64,8 +64,16 @@ export default function Chat() {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    api.log("info", "chat view mounted");
+    window.addEventListener("error", (e) =>
+      api.log("error", `window error: ${e.message} @ ${e.filename}:${e.lineno}`),
+    );
+    window.addEventListener("unhandledrejection", (e: PromiseRejectionEvent) =>
+      api.log("error", `unhandled rejection: ${e.reason}`),
+    );
     api.sessions.list().then(setSessions);
     const off = api.onEvent((e: any) => {
+      api.log("debug", `event: ${e.type}${e.tool ? ` (${e.tool})` : ""}`);
       setItems((prev) => {
         const next = [...prev];
         switch (e.type) {
@@ -133,6 +141,7 @@ export default function Chat() {
   const send = () => {
     const text = input.trim();
     if (!text || busy) return;
+    api.log("info", `sending prompt (${text.length} chars)`);
     setInput("");
     api.send(text);
   };

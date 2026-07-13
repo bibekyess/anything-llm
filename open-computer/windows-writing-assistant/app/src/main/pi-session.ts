@@ -6,7 +6,7 @@
  *
  * Raw events are also appended to <userData>/pi-raw.log for debugging.
  */
-import { ChildProcess, spawn } from "child_process";
+import { ChildProcess, spawn, spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import {
@@ -16,6 +16,49 @@ import {
   loadLlmConfig,
   writeModelsJson,
 } from "./config";
+import log from "./logger";
+
+/**
+ * Resolve how to launch pi WITHOUT a shell. On Windows the global `pi` is a
+ * .cmd shim (not directly spawnable, and shell:true mangles multi-line args
+ * like --system-prompt), so we locate the package's real JS entry next to
+ * the shim and run it with node directly.
+ */
+function resolvePiCommand(): { cmd: string; argv0: string[] } | { error: string } {
+  if (process.platform !== "win32") {
+    return { cmd: "pi", argv0: [] };
+  }
+  const where = spawnSync("where", ["pi"], { encoding: "utf-8" });
+  const shim = (where.stdout || "")
+    .split(/\r?\n/)
+    .find((line) => line.trim().toLowerCase().endsWith(".cmd"));
+  if (!shim) {
+    return {
+      error:
+        "The 'pi' agent CLI was not found on PATH. Install it with: " +
+        "npm install -g --ignore-scripts @earendil-works/pi-coding-agent " +
+        "(then restart the app so PATH refreshes).",
+    };
+  }
+  const pkgDir = path.join(
+    path.dirname(shim.trim()),
+    "node_modules",
+    "@earendil-works",
+    "pi-coding-agent",
+  );
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, "package.json"), "utf-8"));
+    const bin =
+      typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.pi || Object.values(pkg.bin || {})[0];
+    if (!bin) return { error: `No bin entry in ${pkgDir}/package.json` };
+    const entry = path.join(pkgDir, bin as string);
+    if (!fs.existsSync(entry)) return { error: `pi entry script not found: ${entry}` };
+    log.info(`[pi] resolved shim ${shim.trim()} -> node ${entry}`);
+    return { cmd: "node", argv0: [entry] };
+  } catch (err: any) {
+    return { error: `Could not resolve pi's entry script from ${pkgDir}: ${err.message}` };
+  }
+}
 
 export type AppEvent =
   | { type: "user_message"; text: string }
@@ -44,22 +87,30 @@ export class PiSession {
   }
 
   sendPrompt(text: string): void {
+    log.info(`[session ${this.sessionId}] prompt received (${text.length} chars)`);
     this.ensureProcess();
-    if (!this.proc) return;
+    if (!this.proc) {
+      log.error(`[session ${this.sessionId}] no pi process after ensureProcess — prompt dropped`);
+      return;
+    }
     this.onEvent({ type: "user_message", text });
-    this.proc.stdin!.write(
-      JSON.stringify({
-        id: `prompt-${Date.now()}`,
-        type: "prompt",
-        message: text,
-        streamingBehavior: "followUp",
-      }) + "\n",
-    );
+    const payload = JSON.stringify({
+      id: `prompt-${Date.now()}`,
+      type: "prompt",
+      message: text,
+      streamingBehavior: "followUp",
+    });
+    log.debug(`[session ${this.sessionId}] -> pi stdin: ${payload.slice(0, 200)}`);
+    this.proc.stdin!.write(payload + "\n");
   }
 
   /** Answer an ask_user / confirm request raised by an extension. */
   respond(requestId: string, value: string): void {
-    if (!this.proc) return;
+    log.info(`[session ${this.sessionId}] ui response for ${requestId}: ${value.slice(0, 80)}`);
+    if (!this.proc) {
+      log.warn(`[session ${this.sessionId}] respond() with no pi process`);
+      return;
+    }
     this.proc.stdin!.write(
       JSON.stringify({ type: "extension_ui_response", id: requestId, value }) + "\n",
     );
@@ -67,6 +118,7 @@ export class PiSession {
 
   stop(): void {
     if (this.proc) {
+      log.info(`[session ${this.sessionId}] stopping pi (pid ${this.proc.pid})`);
       try {
         this.proc.kill();
       } catch {}
@@ -78,15 +130,31 @@ export class PiSession {
 
   // ── internals ────────────────────────────────────────────────────────
   private ensureProcess(): void {
-    if (this.running) return;
+    if (this.running) {
+      log.debug(`[session ${this.sessionId}] pi already running (pid ${this.proc!.pid})`);
+      return;
+    }
     const cfg = loadLlmConfig();
     if ("error" in cfg) {
+      log.error(`[session ${this.sessionId}] config error: ${cfg.error}`);
       this.onEvent({ type: "fatal", text: cfg.error });
       return;
     }
+    log.info(
+      `[session ${this.sessionId}] config: model=${cfg.model} baseUrl=${cfg.baseUrl} ` +
+      `context=${cfg.contextWindow} keySet=${!!cfg.apiKey}`,
+    );
     writeModelsJson(cfg);
 
+    const resolved = resolvePiCommand();
+    if ("error" in resolved) {
+      log.error(`[session ${this.sessionId}] ${resolved.error}`);
+      this.onEvent({ type: "fatal", text: resolved.error });
+      return;
+    }
+
     const args = [
+      ...resolved.argv0,
       "--mode", "rpc",
       "--provider", PROVIDER_NAME,
       "--model", cfg.model,
@@ -97,9 +165,15 @@ export class PiSession {
     ];
 
     this.rawLog = fs.createWriteStream(path.join(this.userDataDir, "pi-raw.log"), { flags: "a" });
-    this.proc = spawn("pi", args, {
+    const logArgs = args.map((a) => (a === SYSTEM_PROMPT ? "<system-prompt>" : a));
+    log.info(
+      `[session ${this.sessionId}] spawning: ${resolved.cmd} ${logArgs.join(" ")} (cwd=${ASSISTANT_ROOT})`,
+    );
+    // NOTE: no shell — shell:true does not escape args on Windows and mangles
+    // the multi-line system prompt through cmd.exe.
+    this.proc = spawn(resolved.cmd, args, {
       cwd: ASSISTANT_ROOT,
-      shell: process.platform === "win32", // resolve pi.cmd from npm on PATH
+      shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,
@@ -110,8 +184,10 @@ export class PiSession {
         ...(cfg.apiKey ? { OPENAI_API_KEY: cfg.apiKey } : {}),
       },
     });
+    log.info(`[session ${this.sessionId}] pi spawned, pid=${this.proc.pid}`);
 
     this.proc.on("error", (err) => {
+      log.error(`[session ${this.sessionId}] spawn error: ${err.message}`);
       this.onEvent({
         type: "fatal",
         text:
@@ -119,14 +195,20 @@ export class PiSession {
           `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`,
       });
     });
-    this.proc.on("exit", (code) => {
+    this.proc.on("exit", (code, signal) => {
+      log.warn(`[session ${this.sessionId}] pi exited code=${code} signal=${signal}`);
       if (code !== 0 && code !== null) {
-        this.onEvent({ type: "fatal", text: `Agent process exited (code ${code}).` });
+        this.onEvent({
+          type: "fatal",
+          text: `Agent process exited (code ${code}). See logs/main.log and pi-raw.log.`,
+        });
       }
       this.proc = null;
     });
     this.proc.stderr!.on("data", (chunk: Buffer) => {
-      this.rawLog?.write(`[stderr] ${chunk.toString("utf-8")}`);
+      const text = chunk.toString("utf-8");
+      this.rawLog?.write(`[stderr] ${text}`);
+      log.warn(`[pi stderr] ${text.trim().slice(0, 500)}`);
     });
     this.proc.stdout!.on("data", (chunk: Buffer) => {
       this.buffer += chunk.toString("utf-8");
@@ -155,9 +237,15 @@ export class PiSession {
     try {
       event = JSON.parse(line);
     } catch {
+      log.debug(`[pi stdout, non-JSON] ${line.slice(0, 300)}`);
       return; // non-JSON chatter on stdout
     }
     const etype = event.type || event.event;
+    log.debug(
+      `[session ${this.sessionId}] <- pi event: ${etype}` +
+      (event.toolName ? ` tool=${event.toolName}` : "") +
+      (etype === "response" ? ` success=${event.success}` : ""),
+    );
     switch (etype) {
       case "message_start": {
         const msg = event.message;

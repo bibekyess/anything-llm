@@ -149,8 +149,17 @@ npm run dev        # launches the app with hot reload
 The app spawns `pi --mode rpc` under the hood (same config as
 `run_agent.py` — it reads `agent\.env`) and streams its events into the chat.
 If pi's RPC event format ever changes, the only file to fix is
-`app/src/main/pi-session.ts`; raw events are logged to
-`%APPDATA%\writing-assistant-app\pi-raw.log` for debugging.
+`app/src/main/pi-session.ts`.
+
+**Debugging — when the chat does nothing, read these two files:**
+
+- `%APPDATA%\writing-assistant-app\logs\main.log` — everything the app does:
+  config resolution, the exact pi spawn command, every prompt sent, every pi
+  event received (type-level), pi stderr, exit codes, renderer errors.
+- `%APPDATA%\writing-assistant-app\pi-raw.log` — the raw JSON event lines
+  from pi, plus its stderr verbatim.
+
+In `npm run dev` the same log lines also stream to the terminal.
 
 ### 7. Try the sidecar by hand (optional)
 
