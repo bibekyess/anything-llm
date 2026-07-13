@@ -178,13 +178,20 @@ export default function (pi: ExtensionAPI) {
     name: "doc_open",
     label: "Open Document",
     description:
-      "Open a document (or attach to it if already open). The hosting app is chosen by extension (.docx/.doc → Word). The window stays visible so the user can watch edits.",
+      "Open a document (or attach to it if already open). The hosting app is chosen by extension: .docx/.doc → Word, .hwp/.hwpx → Hancom Office, .pptx/.ppt → PowerPoint (returns a presentation handle — use slide_* tools with it). The window stays visible so the user can watch edits. HWP note: editing is most reliable via doc_replace and doc_insert at end/bookmark (bookmark = HWP field).",
     parameters: Type.Object({
       path: Type.String({ description: "Absolute path to the document." }),
       app: Type.Optional(
-        Type.Union([Type.Literal("word"), Type.Literal("fake")], {
-          description: "Force a hosting app.",
-        })
+        Type.Union(
+          [
+            Type.Literal("word"),
+            Type.Literal("hwp"),
+            Type.Literal("powerpoint"),
+            Type.Literal("fake"),
+            Type.Literal("fakepres"),
+          ],
+          { description: "Force a hosting app." }
+        )
       ),
       read_only: Type.Optional(Type.Boolean({ description: "Open without write access." })),
     }),
@@ -496,12 +503,241 @@ export default function (pi: ExtensionAPI) {
         Type.Literal("pdf"),
         Type.Literal("odt"),
         Type.Literal("txt"),
-      ]),
+        Type.Literal("hwp"),
+        Type.Literal("hwpx"),
+      ], { description: "hwp/hwpx only when the document is hosted in Hancom Office." }),
     }),
     async execute(_id, params) {
       try {
         const res = await sidecar.call("doc_save_as", params);
         return ok(`Saved as ${res.path} (${res.format}).`, res);
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  // ── presentation (slide/shape-oriented) tools ─────────────────────────
+  pi.registerTool({
+    name: "slide_list",
+    label: "List Slides",
+    description:
+      "Outline of a presentation (handle from doc_open on a .pptx, or doc_new with app=powerpoint): every slide's index, hash, layout, title, and whether it has notes. Call this first.",
+    parameters: Type.Object({ doc: Type.String() }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("slide_list", params);
+        if (!res.slides.length) return ok("Presentation has no slides.", res);
+        const lines = res.slides.map(
+          (s: any) =>
+            `[s${s.slide}#${s.hash}] layout='${s.layout}' "${s.title}"${s.notes ? " (notes)" : ""}`
+        );
+        return ok(`${res.count} slide(s):\n` + lines.join("\n"), res);
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "slide_read",
+    label: "Read Slide",
+    description:
+      "All text-bearing shapes on one slide (id, placeholder kind, text, hash) plus speaker notes. Shape ids like sh5 are stable anchors for slide_edit_text.",
+    parameters: Type.Object({
+      doc: Type.String(),
+      slide: Type.Number({ description: "0-based slide index from slide_list." }),
+    }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("slide_read", params);
+        const lines = res.shapes.map(
+          (s: any) =>
+            `[s${res.slide}/${s.shape}#${s.hash}] ${s.placeholder || "shape"}: ${s.text.replace(/\n/g, " • ")}`
+        );
+        if (res.notes) lines.push(`notes: ${res.notes}`);
+        return ok(lines.join("\n") || "(slide has no text shapes)", res);
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "slide_add",
+    label: "Add Slide",
+    description:
+      "Add a slide (or duplicate one with duplicate_of). body: '\\n' = new bullet, leading tabs = indent level. Omit after_slide to append at the end.",
+    parameters: Type.Object({
+      doc: Type.String(),
+      after_slide: Type.Optional(Type.Number()),
+      layout: Type.Optional(Type.String({ description: "Layout name from the template, e.g. 'Title and Content'." })),
+      title: Type.Optional(Type.String()),
+      body: Type.Optional(Type.String()),
+      duplicate_of: Type.Optional(Type.Number({ description: "Duplicate this slide instead of creating from a layout." })),
+    }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("slide_add", params);
+        return ok(
+          `Added slide s${res.slide} (${res.count} total). Verify layout with slide_thumbnail if it matters.`,
+          res
+        );
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "slide_edit_text",
+    label: "Edit Slide Text",
+    description:
+      "Rewrite one shape's text (shape id + expect_hash from slide_read; refused as STALE_RANGE if the user changed it). '\\n' = new paragraph/bullet, leading tabs = indent. Empty string clears the shape.",
+    parameters: Type.Object({
+      doc: Type.String(),
+      slide: Type.Number(),
+      shape: Type.String({ description: "Shape id from slide_read, e.g. 'sh5'." }),
+      text: Type.String(),
+      expect_hash: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("slide_edit_text", params);
+        return ok(`Updated s${res.slide}/${res.shape} (new hash #${res.hash}).`, res);
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "slide_notes_edit",
+    label: "Edit Speaker Notes",
+    description: "Replace the speaker notes of a slide.",
+    parameters: Type.Object({
+      doc: Type.String(),
+      slide: Type.Number(),
+      text: Type.String(),
+    }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("slide_notes_edit", params);
+        return ok(`Notes updated on s${res.slide}.`, res);
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "slide_reorder",
+    label: "Reorder Slide",
+    description: "Move a slide to a new 0-based position.",
+    parameters: Type.Object({
+      doc: Type.String(),
+      slide: Type.Number(),
+      to_index: Type.Number(),
+    }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("slide_reorder", params);
+        return ok(`Moved slide s${res.moved_from} to position ${res.moved_to}.`, res);
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "slide_delete",
+    label: "Delete Slide",
+    description:
+      "Delete a slide. Asks the user for confirmation first. Pass expect_hash from slide_list as a safety check.",
+    parameters: Type.Object({
+      doc: Type.String(),
+      slide: Type.Number(),
+      expect_hash: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (!(await confirm(ctx, `Delete slide ${params.slide} from ${params.doc}?`))) {
+        return ok("Deletion cancelled by user.");
+      }
+      try {
+        const res = await sidecar.call("slide_delete", params);
+        return ok(`Deleted slide ${res.deleted}; ${res.count} remain.`, res);
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "slide_thumbnail",
+    label: "Slide Thumbnail",
+    description:
+      "Render one slide to a PNG for visual verification after layout-affecting edits (slides are visual — text tools can't tell you if the layout broke).",
+    parameters: Type.Object({
+      doc: Type.String(),
+      slide: Type.Number(),
+      width_px: Type.Optional(Type.Number({ description: "Default 960." })),
+    }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("slide_thumbnail", params, 60_000);
+        return {
+          content: [
+            { type: "image", data: res.png_base64, mimeType: "image/png" } as any,
+            { type: "text", text: `Slide s${res.slide} rendered to ${res.path}.` },
+          ],
+          details: { path: res.path, slide: res.slide },
+        };
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "pres_save_as",
+    label: "Save Presentation As",
+    description:
+      "Save a presentation (pptx, ppt, pdf, odp; 'png' exports every slide as an image into a directory).",
+    parameters: Type.Object({
+      doc: Type.String(),
+      path: Type.String(),
+      format: Type.Union([
+        Type.Literal("pptx"),
+        Type.Literal("ppt"),
+        Type.Literal("pdf"),
+        Type.Literal("odp"),
+        Type.Literal("png"),
+      ]),
+    }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("pres_save_as", params, 120_000);
+        return ok(`Saved as ${res.path} (${res.format}).`, res);
+      } catch (e) {
+        return ok(errText(e));
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "hwp_fields",
+    label: "List HWP Fields",
+    description:
+      "List named fields (누름틀) in a Hancom HWP document — the reliable anchors for HWP editing. Write into one with doc_insert where=bookmark, bookmark=<field name>.",
+    parameters: Type.Object({ doc: Type.String() }),
+    async execute(_id, params) {
+      try {
+        const res = await sidecar.call("hwp_fields", params);
+        if (!res.fields.length) return ok("No named fields in this document.", res);
+        return ok(
+          res.fields.map((f: any) => `${f.name}: ${f.text || "(empty)"}`).join("\n"),
+          res
+        );
       } catch (e) {
         return ok(errText(e));
       }

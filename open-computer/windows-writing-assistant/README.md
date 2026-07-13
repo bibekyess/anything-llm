@@ -18,6 +18,22 @@ pi extension with 14 tools:
 `doc_apply_style` · `doc_tables` (list/read/write/create) · `doc_save` ·
 `doc_save_as` · `doc_close`
 
+**Slice 3 adds presentations and Hancom HWP:**
+
+- **PowerPoint** (`.pptx`/`.ppt` → `PptDriver`): `slide_list` · `slide_read` ·
+  `slide_add` (incl. duplicate) · `slide_edit_text` (stable `Shape.Id` +
+  hash anchoring) · `slide_notes_edit` · `slide_reorder` · `slide_delete`
+  (gated) · `slide_thumbnail` (PNG render for visual verification) ·
+  `pres_save_as` (pptx/ppt/pdf/odp/png). Verified via `smoke\ppt_smoke.py`.
+- **Hancom Office** (`.hwp`/`.hwpx` → `HwpDriver`): scan-based `doc_read`,
+  `doc_insert` (end/cursor/field), find-anchored `doc_replace`, `hwp_fields`
+  (누름틀 listing — the durable anchors), `doc_save_as` hwp/hwpx/pdf.
+  ⚠ **Unverified against a real Hancom install**: the driver follows Hancom's
+  automation reference and pyhwpx patterns but carries `TODO(verify)` marks —
+  run `smoke\hwp_smoke.py` on a machine with Hancom Office and report failing
+  steps; each maps to a call signature to adjust. If a security popup appears,
+  set `HWP_SECURITY_DLL` to Hancom's FilePathChecker DLL path first.
+
 These cover the two target workflows end-to-end:
 
 1. **"Write me a report on X"** → the LLM writes markdown → `doc_new` +

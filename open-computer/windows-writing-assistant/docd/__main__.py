@@ -36,11 +36,17 @@ def main():
     drivers = {}
     use_com = False
     if args.backend == "word":
+        from .drivers.hwp import HwpDriver
+        from .drivers.ppt import PptDriver
         from .drivers.word import WordDriver
         drivers["word"] = WordDriver()
+        drivers["powerpoint"] = PptDriver()
+        drivers["hwp"] = HwpDriver()
         use_com = True
     from .drivers.fake import FakeDriver
+    from .drivers.fake_pres import FakePresDriver
     drivers["fake"] = FakeDriver()
+    drivers["fakepres"] = FakePresDriver()
 
     RpcServer(Dispatcher(drivers), use_com=use_com).serve()
 

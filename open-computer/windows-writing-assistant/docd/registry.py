@@ -12,8 +12,10 @@ from .errors import DocdError, BAD_PARAMS, NO_SUCH_DOC, UNKNOWN_METHOD
 
 EXT_TO_APP = {
     ".docx": "word", ".doc": "word", ".rtf": "word",
+    ".hwp": "hwp", ".hwpx": "hwp",
+    ".pptx": "powerpoint", ".ppt": "powerpoint",
     ".txt": "fake", ".md": "fake",   # fake backend claims plain text in dev
-    # slice 2+: .hwp/.hwpx -> hwp, .odt -> libreoffice, .pptx/.ppt -> powerpoint
+    # slice 3+: .odt -> libreoffice, .odp -> impress
 }
 
 
@@ -38,6 +40,18 @@ class Dispatcher:
             "doc_save": self._by_handle("save"),
             "doc_save_as": self._by_handle("save_as"),
             "doc_close": self._by_handle("close"),
+            # presentations (slide/shape-oriented subset)
+            "slide_list": self._by_handle("slide_list"),
+            "slide_read": self._by_handle("slide_read"),
+            "slide_add": self._by_handle("slide_add"),
+            "slide_edit_text": self._by_handle("slide_edit_text"),
+            "slide_notes_edit": self._by_handle("slide_notes_edit"),
+            "slide_reorder": self._by_handle("slide_reorder"),
+            "slide_delete": self._by_handle("slide_delete"),
+            "slide_thumbnail": self._by_handle("slide_thumbnail"),
+            "pres_save_as": self._by_handle("pres_save_as"),
+            # HWP extras
+            "hwp_fields": self._by_handle("hwp_fields"),
         }
 
     def handle(self, method, params):
@@ -61,7 +75,14 @@ class Dispatcher:
             if not doc:
                 raise DocdError(BAD_PARAMS, f"'{method_name}' requires `doc`.")
             driver = self._driver_for_handle(doc)
-            return getattr(driver, method_name)(doc, **kwargs)
+            method = getattr(driver, method_name, None)
+            if method is None:
+                from .errors import UNSUPPORTED_ON_BACKEND
+                raise DocdError(
+                    UNSUPPORTED_ON_BACKEND,
+                    f"'{method_name}' is not available on the {driver.backend} backend.",
+                )
+            return method(doc, **kwargs)
         return call
 
     # ── methods ────────────────────────────────────────────────────────
