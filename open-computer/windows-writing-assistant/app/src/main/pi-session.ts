@@ -93,6 +93,7 @@ export class PiSession {
       log.error(`[session ${this.sessionId}] no pi process after ensureProcess — prompt dropped`);
       return;
     }
+    this.resetPromptState();
     this.onEvent({ type: "user_message", text });
     const payload = JSON.stringify({
       id: `prompt-${Date.now()}`,
@@ -221,16 +222,47 @@ export class PiSession {
     });
   }
 
-  private textBuf = "";
+  // ── per-prompt streaming state ───────────────────────────────────────
+  private streamedChars = 0;        // deltas emitted for the current message
+  private startText = "";           // text seen in message_start (fallback)
+  private emittedThisPrompt = false; // any assistant text since last prompt
+  private lastError = "";           // last error string seen from pi
+  private retries = 0;
 
-  private flushTextBuf(): void {
-    if (this.textBuf.trim()) {
-      this.onEvent({ type: "assistant_delta", text: this.textBuf });
-      this.textBuf = "";
+  private resetPromptState(): void {
+    this.streamedChars = 0;
+    this.startText = "";
+    this.emittedThisPrompt = false;
+    this.lastError = "";
+    this.retries = 0;
+  }
+
+  /** Pull all text parts out of a pi message object. */
+  private static extractText(msg: any): string {
+    if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return "";
+    return msg.content
+      .filter((p: any) => p?.type === "text" && p.text)
+      .map((p: any) => p.text)
+      .join("");
+  }
+
+  /** Remember any error-ish field so we can report it at settle time. */
+  private captureError(event: any): void {
+    const err =
+      event.error || event.errorMessage || event.message?.errorMessage ||
+      (event.message?.stopReason === "error" ? event.message?.stopReasonMessage : "");
+    if (err) {
+      this.lastError = String(typeof err === "object" ? JSON.stringify(err) : err);
+      log.warn(`[session ${this.sessionId}] pi reported error: ${this.lastError.slice(0, 400)}`);
     }
   }
 
-  /** Event field names mirror session/hypervisor.js:handleRpcEvent. */
+  /**
+   * Event adapter. Supports both the schema open-computer's hypervisor.js
+   * documents (message_update deltas, response = done) and the newer agent
+   * lifecycle vocabulary observed in the field (agent_start/turn_end,
+   * auto_retry_start/end, agent_settled; response = prompt ack).
+   */
   private handleLine(line: string): void {
     this.rawLog?.write(line + "\n");
     let event: any;
@@ -243,34 +275,49 @@ export class PiSession {
     const etype = event.type || event.event;
     log.debug(
       `[session ${this.sessionId}] <- pi event: ${etype}` +
-      (event.toolName ? ` tool=${event.toolName}` : "") +
-      (etype === "response" ? ` success=${event.success}` : ""),
+      (event.toolName ? ` tool=${event.toolName}` : ""),
     );
+    // Payload-level visibility for the events that matter when diagnosing.
+    if (["message_end", "turn_end", "agent_end", "response", "auto_retry_start",
+         "agent_settled", "error"].includes(etype)) {
+      log.debug(`[session ${this.sessionId}] raw ${etype}: ${line.slice(0, 600)}`);
+    }
+    this.captureError(event);
+
     switch (etype) {
+      case "agent_start":
+      case "turn_start":
+        this.onEvent({ type: "status", text: "thinking…" });
+        break;
+
       case "message_start": {
-        const msg = event.message;
-        if (msg?.role === "assistant" && Array.isArray(msg.content)) {
-          for (const part of msg.content) {
-            if (part.type === "text" && part.text) {
-              this.onEvent({ type: "assistant_message", text: part.text });
-            }
-          }
-        }
+        this.streamedChars = 0;
+        this.startText = PiSession.extractText(event.message);
         break;
       }
       case "message_update": {
         const ae = event.assistantMessageEvent;
         if (ae?.type === "text_delta" && ae.delta) {
-          this.textBuf += ae.delta;
+          this.streamedChars += ae.delta.length;
+          this.emittedThisPrompt = true;
           this.onEvent({ type: "assistant_delta", text: ae.delta });
         }
         break;
       }
-      case "message_end":
-        this.textBuf = "";
+      case "message_end": {
+        // Some pi versions deliver the complete message only here (or only in
+        // message_start) with no deltas in between — emit it exactly once.
+        const full = PiSession.extractText(event.message) || this.startText;
+        if (full && this.streamedChars === 0) {
+          this.emittedThisPrompt = true;
+          this.onEvent({ type: "assistant_message", text: full });
+        }
+        this.streamedChars = 0;
+        this.startText = "";
         break;
+      }
+
       case "tool_execution_start": {
-        this.textBuf = "";
         if (event.toolName) {
           const argsJson = event.args ? JSON.stringify(event.args) : "";
           this.onEvent({
@@ -295,6 +342,7 @@ export class PiSession {
         }
         break;
       }
+
       case "extension_ui_request": {
         if (["input", "confirm", "select"].includes(event.method)) {
           this.onEvent({
@@ -309,15 +357,41 @@ export class PiSession {
         }
         break;
       }
-      case "response": {
+
+      case "auto_retry_start":
+        this.retries++;
         this.onEvent({
-          type: "task_done",
-          error: event.success === false && event.error ? String(event.error) : undefined,
+          type: "status",
+          text: `LLM call failed — retrying (attempt ${this.retries})…`,
         });
         break;
+
+      case "agent_settled": {
+        // Definitive end-of-prompt in the lifecycle schema.
+        let error: string | undefined;
+        if (!this.emittedThisPrompt) {
+          error =
+            this.lastError ||
+            "The model returned no response. Check that your LLM endpoint is " +
+            "reachable (is Ollama running? is the model pulled?) — see logs/main.log.";
+        }
+        this.onEvent({ type: "task_done", error });
+        this.resetPromptState();
+        break;
       }
+
+      case "response": {
+        // Older schema: response = prompt finished. Newer schema: response is
+        // just the RPC ack for the prompt command — only surface failures.
+        if (event.success === false && event.error) {
+          this.onEvent({ type: "task_done", error: String(event.error) });
+          this.resetPromptState();
+        }
+        break;
+      }
+
       case "streaming_start":
-        this.onEvent({ type: "status", text: "thinking" });
+        this.onEvent({ type: "status", text: "thinking…" });
         break;
       default:
         break;

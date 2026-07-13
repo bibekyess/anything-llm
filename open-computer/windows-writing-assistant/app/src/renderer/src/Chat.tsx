@@ -60,6 +60,7 @@ export default function Chat() {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -128,8 +129,13 @@ export default function Chat() {
         }
         return next;
       });
-      if (e.type === "task_done" || e.type === "fatal") setBusy(false);
+      if (e.type === "task_done" || e.type === "fatal") {
+        setBusy(false);
+        setStatus("");
+      }
       if (e.type === "user_message") setBusy(true);
+      if (e.type === "status") setStatus(e.text);
+      if (e.type === "assistant_delta" || e.type === "assistant_message") setStatus("");
     });
     return off;
   }, []);
@@ -246,7 +252,7 @@ export default function Chat() {
               return <div key={i} className="bubble error glass">⚠ {item.text}</div>;
           }
         })}
-        {busy && <div className="working">working…</div>}
+        {busy && <div className="working">{status || "working…"}</div>}
       </div>
 
       <footer className="composer glass">
