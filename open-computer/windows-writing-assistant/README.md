@@ -131,7 +131,28 @@ the exact pi command without launching (useful to verify your `.env`).
 > with a writing-assistant system prompt. pi hosts the agent loop; doc-tools.ts
 > forwards tool calls to the docd sidecar; docd drives Word over COM.
 
-### 6. Try the sidecar by hand (optional)
+### 6. Run the desktop app 🪟 (glass chat UI)
+
+A frameless Electron app (electron-vite + React) that replaces the pi
+terminal: Win11 acrylic glass chat window, streaming replies, live tool
+progress chips ("✍️ Writing…"), in-chat Yes/No cards for save confirmations,
+persistent history sidebar, **Alt+Space** to summon/hide from anywhere, and
+minimize turns into a small floating orb.
+
+```powershell
+# prerequisites: steps 2 + 5 above (pywin32, pi installed, agent\.env filled)
+cd app
+npm install
+npm run dev        # launches the app with hot reload
+```
+
+The app spawns `pi --mode rpc` under the hood (same config as
+`run_agent.py` — it reads `agent\.env`) and streams its events into the chat.
+If pi's RPC event format ever changes, the only file to fix is
+`app/src/main/pi-session.ts`; raw events are logged to
+`%APPDATA%\writing-assistant-app\pi-raw.log` for debugging.
+
+### 7. Try the sidecar by hand (optional)
 
 The sidecar is just a process speaking JSON lines — you can drive it from any
 terminal:
