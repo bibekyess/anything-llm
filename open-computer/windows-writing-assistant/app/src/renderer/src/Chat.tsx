@@ -8,6 +8,25 @@ type Item =
   | { kind: "ask"; requestId: string; method: string; question: string; answered?: string }
   | { kind: "error"; text: string };
 
+interface UsageInfo {
+  contextTokens: number;
+  contextWindow: number;
+  percent: number;
+  cost: number | null; // null = model pricing unknown
+}
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(n >= 100_000 ? 0 : 1) + "k";
+  return String(n);
+}
+
+function fmtCost(c: number | null): string {
+  if (c === null) return "$—";
+  if (c === 0) return "$0.00";
+  return c >= 0.1 ? `$${c.toFixed(2)}` : `$${c.toFixed(4)}`;
+}
+
 interface SessionMeta {
   id: string;
   title: string;
@@ -54,6 +73,23 @@ function replayToItems(events: any[]): Item[] {
   return items;
 }
 
+const SUGGESTIONS = [
+  "Write a one-page report on Korean culture in a new Word document",
+  "Convert my selected text into a table",
+  "Proofread this document and fix grammar",
+];
+
+function PinIcon({ off }: { off?: boolean }) {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 17v5" />
+      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+      {off && <line x1="3" y1="3" x2="21" y2="21" />}
+    </svg>
+  );
+}
+
 export default function Chat() {
   const api = (window as any).assistant;
   const [items, setItems] = useState<Item[]>([]);
@@ -62,7 +98,25 @@ export default function Chat() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [input, setInput] = useState("");
+  const [pinned, setPinned] = useState(true); // window starts alwaysOnTop
+  const [usage, setUsage] = useState<UsageInfo | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const togglePin = () => {
+    const next = !pinned;
+    setPinned(next);
+    api.win.setPin(next);
+  };
+
+  const autoGrow = () => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+    // Only show a scrollbar once the input is taller than its max height.
+    el.style.overflowY = el.scrollHeight > 120 ? "auto" : "hidden";
+  };
 
   useEffect(() => {
     api.log("info", "chat view mounted");
@@ -136,6 +190,13 @@ export default function Chat() {
       if (e.type === "user_message") setBusy(true);
       if (e.type === "status") setStatus(e.text);
       if (e.type === "assistant_delta" || e.type === "assistant_message") setStatus("");
+      if (e.type === "usage")
+        setUsage({
+          contextTokens: e.contextTokens,
+          contextWindow: e.contextWindow,
+          percent: e.percent,
+          cost: e.cost,
+        });
     });
     return off;
   }, []);
@@ -149,6 +210,7 @@ export default function Chat() {
     if (!text || busy) return;
     api.log("info", `sending prompt (${text.length} chars)`);
     setInput("");
+    requestAnimationFrame(autoGrow);
     api.send(text);
   };
 
@@ -164,6 +226,8 @@ export default function Chat() {
   const openSession = async (id: string) => {
     const events = await api.sessions.load(id);
     setItems(replayToItems(events));
+    const lastUsage = [...events].reverse().find((e: any) => e.type === "usage");
+    setUsage(lastUsage || null);
     setSidebarOpen(false);
     setBusy(false);
   };
@@ -171,6 +235,7 @@ export default function Chat() {
   const newChat = async () => {
     await api.sessions.create();
     setItems([]);
+    setUsage(null);
     setSessions(await api.sessions.list());
     setSidebarOpen(false);
     setBusy(false);
@@ -182,6 +247,13 @@ export default function Chat() {
         <button className="icon-btn no-drag" onClick={() => setSidebarOpen(!sidebarOpen)}>☰</button>
         <span className="title">Writing Assistant</span>
         <div className="win-controls no-drag">
+          <button
+            className={`icon-btn pin ${pinned ? "active" : ""}`}
+            title={pinned ? "Unpin (stop floating above Word)" : "Pin above other windows"}
+            onClick={togglePin}
+          >
+            <PinIcon off={!pinned} />
+          </button>
           <button className="icon-btn" title="Minimize to orb" onClick={() => api.win.minimize()}>─</button>
           <button className="icon-btn close" title="Quit" onClick={() => api.win.close()}>✕</button>
         </div>
@@ -203,13 +275,25 @@ export default function Chat() {
 
       <div className="messages" ref={scrollRef}>
         {items.length === 0 && (
-          <div className="empty glass">
+          <div className="empty">
+            <div className="empty-mark">✦</div>
             <h2>What should we write?</h2>
-            <p>
-              Try: <em>“Write a one-page report on Korean culture in a new Word document”</em>
-              {" "}or select text in Word and ask{" "}
-              <em>“convert my selected text into a table”.</em>
-            </p>
+            <p>I work directly in your Word window — every edit lands live, and Ctrl+Z undoes it.</p>
+            <div className="suggestions">
+              {SUGGESTIONS.map((s) => (
+                <button
+                  key={s}
+                  className="suggestion"
+                  onClick={() => {
+                    setInput(s);
+                    inputRef.current?.focus();
+                    requestAnimationFrame(autoGrow);
+                  }}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
           </div>
         )}
         {items.map((item, i) => {
@@ -255,12 +339,46 @@ export default function Chat() {
         {busy && <div className="working">{status || "working…"}</div>}
       </div>
 
+      {usage && (
+        <div className="statusbar">
+          <div
+            className="ctx"
+            title={`Context: ${usage.contextTokens.toLocaleString()} of ${usage.contextWindow.toLocaleString()} tokens`}
+          >
+            <div className="ctx-track">
+              <div
+                className={`ctx-fill ${usage.percent > 90 ? "danger" : usage.percent > 75 ? "warn" : ""}`}
+                style={{ width: `${Math.min(100, usage.percent)}%` }}
+              />
+            </div>
+            <span>
+              {fmtTokens(usage.contextTokens)} / {fmtTokens(usage.contextWindow)} ·{" "}
+              {usage.percent.toFixed(0)}%
+            </span>
+          </div>
+          <span
+            className="cost"
+            title={
+              usage.cost === null
+                ? "Model pricing unknown — set MODEL_COST_INPUT / MODEL_COST_OUTPUT ($ per million tokens) in agent/.env"
+                : "Session cost so far"
+            }
+          >
+            {fmtCost(usage.cost)}
+          </span>
+        </div>
+      )}
+
       <footer className="composer glass">
         <textarea
+          ref={inputRef}
           value={input}
           placeholder="Ask anything… (Enter to send, Shift+Enter for newline)"
           rows={1}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            autoGrow();
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -268,7 +386,11 @@ export default function Chat() {
             }
           }}
         />
-        <button className="send" onClick={send} disabled={!input.trim() || busy}>➤</button>
+        {busy ? (
+          <button className="send stop" title="Stop generating" onClick={() => api.stop()}>■</button>
+        ) : (
+          <button className="send" title="Send" onClick={send} disabled={!input.trim()}>➤</button>
+        )}
       </footer>
     </div>
   );

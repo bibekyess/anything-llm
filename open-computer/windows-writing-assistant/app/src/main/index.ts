@@ -78,17 +78,31 @@ app.whenReady().then(() => {
     log.info(`ipc chat:respond id=${requestId}`);
     session?.respond(requestId, value);
   });
+  ipcMain.on("chat:stop", () => {
+    log.info("ipc chat:stop");
+    session?.abort();
+  });
   ipcMain.handle("sessions:list", () => history.list());
   ipcMain.handle("sessions:load", (_e, id: string) => {
     log.info(`ipc sessions:load ${id}`);
     startSession(id); // same id -> pi resumes its own session context
-    return history.load(id);
+    const events = history.load(id);
+    // Carry the session's accumulated cost across the process restart.
+    const lastUsage = [...events].reverse().find((e) => e.type === "usage");
+    if (lastUsage && lastUsage.type === "usage" && typeof lastUsage.cost === "number") {
+      session!.seedCost(lastUsage.cost);
+    }
+    return events;
   });
   ipcMain.handle("sessions:new", () => {
     startSession();
     return session!.sessionId;
   });
   ipcMain.on("win:minimize", () => hideToOrb());
+  ipcMain.on("win:pin", (_e, pinned: boolean) => {
+    log.info(`ipc win:pin ${pinned}`);
+    chatWin?.setAlwaysOnTop(pinned);
+  });
   ipcMain.on("win:close", () => {
     log.info("ipc win:close — quitting");
     app.quit();

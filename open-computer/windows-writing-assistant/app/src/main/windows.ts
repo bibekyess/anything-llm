@@ -26,20 +26,30 @@ function loadView(win: BrowserWindow, view: string): void {
 }
 
 export function createChatWindow(): BrowserWindow {
-  const acrylic = supportsAcrylic();
+  // Dock as a right-side panel next to the document the user is working on.
+  const { workArea } = screen.getPrimaryDisplay();
+  const width = 460;
+  const height = Math.min(920, workArea.height - 40);
   const win = new BrowserWindow({
-    width: 520,
-    height: 720,
+    width,
+    height,
+    x: workArea.x + workArea.width - width - 16,
+    y: workArea.y + Math.round((workArea.height - height) / 2),
     minWidth: 380,
     minHeight: 480,
     frame: false,
     show: false,
     autoHideMenuBar: true,
-    // Acrylic gives real glass over whatever is behind the window (Win11).
-    // Elsewhere: solid dark; the CSS glass layers still apply inside.
-    ...(acrylic
-      ? { backgroundMaterial: "acrylic" as const, backgroundColor: "#00000000" }
-      : { backgroundColor: "#16161e" }),
+    // Float over Word so the assistant stays visible while the user types
+    // there; the titlebar pin button toggles this off.
+    alwaysOnTop: true,
+    // Truly transparent window: Word stays visible through the panel at all
+    // times. (Acrylic was tried first, but Windows suspends its blur whenever
+    // the window is unfocused — i.e. almost always for a side-assistant — and
+    // it fell back to flat grey.) The smoked-glass look is drawn in CSS.
+    transparent: true,
+    backgroundColor: "#00000000",
+    hasShadow: false, // shadow is drawn in CSS (native shadow breaks on transparent windows)
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,

@@ -14,6 +14,7 @@ import {
   PROVIDER_NAME,
   SYSTEM_PROMPT,
   loadLlmConfig,
+  resolveModelCost,
   writeModelsJson,
 } from "./config";
 import log from "./logger";
@@ -69,6 +70,14 @@ export type AppEvent =
   | { type: "ask_user"; requestId: string; method: string; question: string; title: string }
   | { type: "task_done"; error?: string }
   | { type: "status"; text: string }
+  | {
+      type: "usage";
+      contextTokens: number;
+      contextWindow: number;
+      percent: number;
+      /** Accumulated session $; null when the model's pricing is unknown. */
+      cost: number | null;
+    }
   | { type: "fatal"; text: string };
 
 export class PiSession {
@@ -86,9 +95,9 @@ export class PiSession {
     return !!this.proc && this.proc.exitCode === null;
   }
 
-  sendPrompt(text: string): void {
+  async sendPrompt(text: string): Promise<void> {
     log.info(`[session ${this.sessionId}] prompt received (${text.length} chars)`);
-    this.ensureProcess();
+    await this.ensureProcess();
     if (!this.proc) {
       log.error(`[session ${this.sessionId}] no pi process after ensureProcess — prompt dropped`);
       return;
@@ -103,6 +112,23 @@ export class PiSession {
     });
     log.debug(`[session ${this.sessionId}] -> pi stdin: ${payload.slice(0, 200)}`);
     this.proc.stdin!.write(payload + "\n");
+  }
+
+  /** Interrupt the current task; pi settles the turn and goes idle. */
+  abort(): void {
+    if (!this.running) {
+      log.warn(`[session ${this.sessionId}] abort() with no running pi process`);
+      return;
+    }
+    log.info(`[session ${this.sessionId}] user abort`);
+    this.userAborted = true;
+    this.proc!.stdin!.write(JSON.stringify({ type: "abort" }) + "\n");
+    this.onEvent({ type: "status", text: "stopping…" });
+  }
+
+  /** Restore accumulated cost when resuming a session from history. */
+  seedCost(cost: number): void {
+    this.sessionCost = cost;
   }
 
   /** Answer an ask_user / confirm request raised by an extension. */
@@ -130,11 +156,23 @@ export class PiSession {
   }
 
   // ── internals ────────────────────────────────────────────────────────
-  private ensureProcess(): void {
+  private starting: Promise<void> | null = null;
+
+  /** Serialize startup so two quick prompts can't spawn two pi processes. */
+  private ensureProcess(): Promise<void> {
     if (this.running) {
       log.debug(`[session ${this.sessionId}] pi already running (pid ${this.proc!.pid})`);
-      return;
+      return Promise.resolve();
     }
+    if (!this.starting) {
+      this.starting = this.startProcess().finally(() => {
+        this.starting = null;
+      });
+    }
+    return this.starting;
+  }
+
+  private async startProcess(): Promise<void> {
     const cfg = loadLlmConfig();
     if ("error" in cfg) {
       log.error(`[session ${this.sessionId}] config error: ${cfg.error}`);
@@ -145,7 +183,21 @@ export class PiSession {
       `[session ${this.sessionId}] config: model=${cfg.model} baseUrl=${cfg.baseUrl} ` +
       `context=${cfg.contextWindow} keySet=${!!cfg.apiKey}`,
     );
-    writeModelsJson(cfg);
+    this.contextWindow = cfg.contextWindow;
+    const cost = await resolveModelCost(cfg);
+    this.costKnown = !!cost;
+    if (cost) {
+      log.info(
+        `[session ${this.sessionId}] pricing: $${cost.input}/M in, $${cost.output}/M out` +
+        (cfg.cost ? " (from .env)" : " (from OpenRouter catalog)"),
+      );
+    } else {
+      log.warn(
+        `[session ${this.sessionId}] no pricing for ${cfg.model} — cost will show as unknown. ` +
+        `Set MODEL_COST_INPUT / MODEL_COST_OUTPUT ($ per million tokens) in agent/.env.`,
+      );
+    }
+    writeModelsJson(cfg, cost);
 
     const resolved = resolvePiCommand();
     if ("error" in resolved) {
@@ -228,6 +280,10 @@ export class PiSession {
   private emittedThisPrompt = false; // any assistant text since last prompt
   private lastError = "";           // last error string seen from pi
   private retries = 0;
+  private userAborted = false;      // user pressed stop for the current prompt
+  private contextWindow = 0;        // from LLM config, for usage percent
+  private sessionCost = 0;          // accumulated $ across the session
+  private costKnown = false;        // pricing resolved for the model
 
   private resetPromptState(): void {
     this.streamedChars = 0;
@@ -235,6 +291,29 @@ export class PiSession {
     this.emittedThisPrompt = false;
     this.lastError = "";
     this.retries = 0;
+    this.userAborted = false;
+  }
+
+  /**
+   * Emit context/cost usage from an assistant message, mirroring pi's own
+   * math: context = usage.totalTokens (or the sum of parts); aborted/error
+   * messages carry no valid usage.
+   */
+  private emitUsage(msg: any): void {
+    const usage = msg?.usage;
+    if (!usage || msg.stopReason === "aborted" || msg.stopReason === "error") return;
+    const contextTokens =
+      usage.totalTokens ||
+      (usage.input || 0) + (usage.output || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0);
+    this.sessionCost += usage.cost?.total || 0;
+    if (contextTokens <= 0) return;
+    this.onEvent({
+      type: "usage",
+      contextTokens,
+      contextWindow: this.contextWindow,
+      percent: this.contextWindow > 0 ? (contextTokens / this.contextWindow) * 100 : 0,
+      cost: this.costKnown ? this.sessionCost : null,
+    });
   }
 
   /** Pull all text parts out of a pi message object. */
@@ -312,6 +391,7 @@ export class PiSession {
           this.emittedThisPrompt = true;
           this.onEvent({ type: "assistant_message", text: full });
         }
+        this.emitUsage(event.message);
         this.streamedChars = 0;
         this.startText = "";
         break;
@@ -369,7 +449,7 @@ export class PiSession {
       case "agent_settled": {
         // Definitive end-of-prompt in the lifecycle schema.
         let error: string | undefined;
-        if (!this.emittedThisPrompt) {
+        if (!this.emittedThisPrompt && !this.userAborted) {
           error =
             this.lastError ||
             "The model returned no response. Check that your LLM endpoint is " +

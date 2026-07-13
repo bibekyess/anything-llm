@@ -13,11 +13,21 @@ export const PROVIDER_NAME = "writing-assistant";
 export const ASSISTANT_ROOT =
   process.env.DOCD_ROOT || path.resolve(__dirname, "..", "..", "..");
 
+/** USD per million tokens — the units pi's calculateCost expects. */
+export interface ModelCost {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
 export interface LlmConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
   contextWindow: number;
+  /** Explicit pricing from .env; when absent we try OpenRouter's catalog. */
+  cost?: ModelCost;
 }
 
 function loadDotenv(file: string): Record<string, string> {
@@ -47,15 +57,66 @@ export function loadLlmConfig(): LlmConfig | { error: string } {
         `(see agent/.env.example for OpenRouter and Ollama examples).`,
     };
   }
+  const costInput = parseFloat(get("MODEL_COST_INPUT"));
+  const costOutput = parseFloat(get("MODEL_COST_OUTPUT"));
   return {
     baseUrl,
     apiKey: get("OPENAI_API_KEY"),
     model,
     contextWindow: parseInt(get("CONTEXT_WINDOW") || "128000", 10),
+    ...(Number.isFinite(costInput) && Number.isFinite(costOutput)
+      ? {
+          cost: {
+            input: costInput,
+            output: costOutput,
+            cacheRead: parseFloat(get("MODEL_COST_CACHE_READ")) || 0,
+            cacheWrite: parseFloat(get("MODEL_COST_CACHE_WRITE")) || 0,
+          },
+        }
+      : {}),
   };
 }
 
-export function writeModelsJson(cfg: LlmConfig): void {
+/** model id -> cost (null = looked up, not priced); avoids refetching per session. */
+const openRouterCostCache = new Map<string, ModelCost | null>();
+
+/**
+ * Resolve $/Mtok pricing for the configured model: explicit .env values win;
+ * otherwise, for OpenRouter endpoints, look the model up in their public
+ * catalog (per-token prices as decimal strings). Returns null when unknown.
+ */
+export async function resolveModelCost(cfg: LlmConfig): Promise<ModelCost | null> {
+  if (cfg.cost) return cfg.cost;
+  if (!/openrouter\.ai/i.test(cfg.baseUrl)) return null;
+  if (openRouterCostCache.has(cfg.model)) return openRouterCostCache.get(cfg.model)!;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/models", {
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body: any = await res.json();
+    const entry = (body.data || []).find((m: any) => m.id === cfg.model);
+    const p = entry?.pricing;
+    const cost: ModelCost | null = p
+      ? {
+          input: (parseFloat(p.prompt) || 0) * 1e6,
+          output: (parseFloat(p.completion) || 0) * 1e6,
+          cacheRead: (parseFloat(p.input_cache_read) || 0) * 1e6,
+          cacheWrite: (parseFloat(p.input_cache_write) || 0) * 1e6,
+        }
+      : null;
+    openRouterCostCache.set(cfg.model, cost);
+    return cost;
+  } catch {
+    return null; // offline or slow catalog — cost stays unknown, don't block the prompt
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function writeModelsJson(cfg: LlmConfig, cost: ModelCost | null): void {
   const piDir = path.join(os.homedir(), ".pi", "agent");
   fs.mkdirSync(piDir, { recursive: true });
   const modelsPath = path.join(piDir, "models.json");
@@ -76,7 +137,14 @@ export function writeModelsJson(cfg: LlmConfig): void {
       supportsUsageInStreaming: false,
       supportsStrictMode: false,
     },
-    models: [{ id: cfg.model, contextWindow: cfg.contextWindow }],
+    models: [
+      {
+        id: cfg.model,
+        contextWindow: cfg.contextWindow,
+        // pi prices each message from this block; without it cost is always 0.
+        ...(cost ? { cost } : {}),
+      },
+    ],
   };
   fs.writeFileSync(modelsPath, JSON.stringify(config, null, 2), "utf-8");
 }
